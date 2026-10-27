@@ -1,0 +1,62 @@
+# Production-oriented compose. Secrets come from a .env file next to this file (never committed).
+#   docker compose up -d db
+#   docker compose --profile tools run --rm migrate
+#   docker compose up -d app
+#   docker compose run --rm app python -m scripts.create_admin --email you@example.com --name "You"
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: sla
+      POSTGRES_USER: sla
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sla -d sla"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks: [backend]          # NOT published to the host: only the app can reach it
+
+  migrate:
+    build: .
+    profiles: ["tools"]
+    command: ["alembic", "upgrade", "head"]
+    environment: &appenv
+      APP_ENV: production
+      DATABASE_URL: postgresql+psycopg2://sla:${POSTGRES_PASSWORD}@db:5432/sla
+      SECRET_KEY: ${SECRET_KEY:?set SECRET_KEY in .env}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-https://leads.example.com}
+      LLM_PROVIDER: ${LLM_PROVIDER:-disabled}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash}
+      RESEARCH_ENABLED: ${RESEARCH_ENABLED:-false}
+      BRAVE_API_KEY: ${BRAVE_API_KEY:-}
+      TAVILY_API_KEY: ${TAVILY_API_KEY:-}
+      ENABLE_DOCS: ${ENABLE_DOCS:-false}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    depends_on:
+      db: {condition: service_healthy}
+    networks: [backend]
+
+  app:
+    build: .
+    restart: unless-stopped
+    environment: *appenv
+    depends_on:
+      db: {condition: service_healthy}
+    ports:
+      - "127.0.0.1:8000:8000"    # bind to localhost; put a TLS reverse proxy (Caddy/nginx) in front
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    networks: [backend]
+
+volumes:
+  pgdata:
+
+networks:
+  backend:
